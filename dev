@@ -1,0 +1,47 @@
+#!/bin/bash -eux
+PROJECT_NAME="aws-dev"
+
+# If a development container is already running, just open another shell in it.
+if docker container inspect "${PROJECT_NAME}" > /dev/null 2>&1; then
+  echo "A development container is already running. Opening a new shell."
+  exec docker exec --interactive --tty --user "$(id --user):$(id --group)" "${PROJECT_NAME}" bash
+fi
+
+# Get the location of the directory that contains this script. The Dockerfile _must_ be in the same directory.
+PROJECT_DIR="$(readlink --canonicalize "$(dirname "${0}")")"
+
+echo "Building image. This may take a while..."
+set +e
+BUILD_OUTPUT="$(docker build "${PROJECT_DIR}" --tag "${PROJECT_NAME}" 2>&1)"
+[[ ${?} -ne 0 ]] && echo "Build failed!" && echo && echo "${BUILD_OUTPUT}" && exit 1
+set -e
+
+echo "Starting container..."
+docker run --detach \
+           --hostname "${PROJECT_NAME}" \
+           --init \
+           --name "${PROJECT_NAME}" \
+           --rm \
+           --volume "$(pwd)/src:/src:rw" \
+           --workdir /src \
+           "${PROJECT_NAME}" \
+             > /dev/null 2>&1
+
+# Ensure the container is stopped when the script exits.
+trap "docker stop --time 0 ${PROJECT_NAME}" EXIT
+
+# If we're root, just run as root, otherwise try to make sure the user we run as inside the container has the same
+# group/user name/ID as the currently running user. If we don't do this then file ownership gets all messed up.
+if [[ ${EUID} -ne 0 ]]; then
+  echo "Configuring user in container..."
+  docker exec "${PROJECT_NAME}" groupdel $(id --group) > /dev/null 2>&1 || true
+  docker exec "${PROJECT_NAME}" groupdel $(id --group --name) > /dev/null 2>&1 || true
+  docker exec "${PROJECT_NAME}" groupadd --gid $(id --group) $(id --group --name)
+  docker exec "${PROJECT_NAME}" userdel $(id --user)  > /dev/null 2>&1 || true
+  docker exec "${PROJECT_NAME}" userdel $(id --user --name) > /dev/null 2>&1 || true
+  docker exec "${PROJECT_NAME}" useradd --uid $(id --user) $(id --user --name) --no-user-group --create-home
+  docker exec "${PROJECT_NAME}" bash -c 'echo "ALL ALL = (ALL) NOPASSWD: ALL" >> /etc/sudoers'
+fi
+
+echo "Opening shell in container..."
+docker exec --interactive --tty --user "$(id --user):$(id --group)" "${PROJECT_NAME}" bash
